@@ -1,0 +1,336 @@
+// PRONOI hackathon backend — persistent store for the procurement dashboard.
+//
+// Inputs (Business/Product/Supplier/SupplierProduct/RecoverySource) are seeded
+// demo data. Everything derived from them (stockout risk, revenue at risk,
+// reorder quantity, supplier ranking, simulation trajectories) is computed at
+// read/write time by src/lib/pronoi/calc.ts + simulate.ts — never stored as a
+// hand-typed constant. Decision/SimulationRun rows cache the LAST computed
+// snapshot for history/audit, not as a substitute for recomputation.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Business {
+  id            String   @id @default(cuid())
+  name          String
+  city          String
+  businessType  String? // matches BusinessType.name — loose reference, not a FK (only a handful of seeded businesses)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  products              Product[]
+  decisions             Decision[]
+  purchaseOrders        PurchaseOrder[]
+  poolingParticipants   PoolingParticipant[]
+  simulationRuns        SimulationRun[]
+  auditEvents           AuditEvent[]
+}
+
+/** Platform-admin catalog of product categories — Product.category stays a free string (matched by name here) so this is additive, not a schema-breaking FK migration. */
+model ProductCategory {
+  id                   String   @id @default(cuid())
+  name                 String   @unique
+  defaultUnit          String
+  defaultShelfLifeDays Int?
+  defaultServiceLevel  Float    @default(0.95)
+  active               Boolean  @default(true)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+}
+
+/** Platform-admin recommendation profile per business type — what an onboarding business of this type should default to. */
+model BusinessType {
+  id                   String   @id @default(cuid())
+  name                 String   @unique
+  description          String?
+  recommendedTools     Json // string[]
+  defaultCategories    Json // string[]
+  seasonalityProfile   String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+}
+
+/**
+ * Admin-configured reorder policy. Matched against a Decision's product
+ * category (+ optionally the business's businessType) at computation time —
+ * see src/server/pronoi/decisions.ts. targetServiceLevel feeds directly into
+ * the real safety-stock/reorder-quantity calculation (calc.ts); the other
+ * fields persist and render as configured policy even where not yet wired
+ * into a live trigger engine.
+ */
+model AutoOrderRule {
+  id                  String   @id @default(cuid())
+  name                String
+  businessType        String? // null = applies to all business types
+  category            String // matches ProductCategory.name / Product.category
+  stockoutRiskThreshold Float  @default(0.7)
+  minRunwayDays       Float?
+  targetServiceLevel  Float    @default(0.95)
+  reorderHorizonDays  Int      @default(1)
+  approvalRequired    Boolean  @default(true)
+  active              Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([category, businessType])
+}
+
+enum RegionStatus {
+  ACTIVE
+  AVAILABLE
+  PLANNED
+}
+
+model Region {
+  id                     String       @id @default(cuid())
+  name                   String
+  country                String
+  status                 RegionStatus @default(PLANNED)
+  supplierCount          Int          @default(0)
+  supportedBusinessTypes Json // string[]
+  createdAt              DateTime     @default(now())
+  updatedAt              DateTime     @updatedAt
+
+  @@unique([name, country])
+}
+
+model Product {
+  id             String   @id
+  businessId     String
+  name           String
+  category       String
+  unit           String
+  currentStock   Float
+  avgDailyDemand Float
+  demandStdDev   Float
+  unitRevenue    Float // KZT of revenue/margin at risk per unit short
+  serviceLevel   Float    @default(0.95)
+  leadTimeDays   Float // the product's own default/primary lead time (falls back when a supplier doesn't override it)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  business           Business             @relation(fields: [businessId], references: [id])
+  supplierProducts   SupplierProduct[]
+  decisions          Decision[]
+  purchaseOrderItems PurchaseOrderItem[]
+  inventorySnapshots InventorySnapshot[]
+  poolingOpportunities PoolingOpportunity[]
+  simulationRuns     SimulationRun[]
+  recoverySources    RecoverySource[]
+
+  @@index([businessId])
+}
+
+model InventorySnapshot {
+  id         String   @id @default(cuid())
+  productId  String
+  stock      Float
+  reason     String // e.g. "seed", "order-delivered"
+  recordedAt DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id])
+
+  @@index([productId])
+}
+
+model Supplier {
+  id               String   @id
+  name             String
+  region           String?
+  minOrderQuantity Float?
+  active           Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  supplierProducts SupplierProduct[]
+  purchaseOrders   PurchaseOrder[]
+  decisions        Decision[]
+}
+
+/** A supplier's quote for one specific product — price, lead time, and reliability are all per-relationship, matching the real demo data (the same supplier is not equally reliable for every product it quotes). */
+model SupplierProduct {
+  id               String  @id @default(cuid())
+  supplierId       String
+  productId        String
+  pricePerUnit     Float
+  leadTimeDays     Float
+  onTimeRate       Float // 0..1
+  typicalDelayDays Float // extra days a late delivery typically takes
+  isActive         Boolean @default(true)
+
+  supplier Supplier @relation(fields: [supplierId], references: [id])
+  product  Product  @relation(fields: [productId], references: [id])
+
+  @@unique([supplierId, productId])
+  @@index([productId])
+}
+
+enum DecisionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+/** A cached snapshot of the engine's last computation for a product. Recomputed in place while PENDING; frozen once APPROVED/REJECTED as history. */
+model Decision {
+  id                      String         @id @default(cuid())
+  businessId              String
+  productId               String
+  status                  DecisionStatus @default(PENDING)
+  stockoutRisk            Float // 0..1
+  revenueAtRisk           Float
+  recommendedQty          Float
+  recommendedSupplierId   String?
+  expectedDemandLeadTime  Float
+  demandStdLeadTime       Float
+  safetyStock             Float
+  zScore                  Float
+  daysUntilStockout       Float
+  explanation             String?
+  createdAt               DateTime       @default(now())
+  updatedAt                DateTime      @updatedAt
+  approvedAt              DateTime?
+  rejectedAt              DateTime?
+
+  business           Business        @relation(fields: [businessId], references: [id])
+  product            Product         @relation(fields: [productId], references: [id])
+  recommendedSupplier Supplier?      @relation(fields: [recommendedSupplierId], references: [id])
+  purchaseOrder      PurchaseOrder?
+
+  @@index([productId, createdAt])
+  @@index([businessId])
+}
+
+enum PurchaseOrderStatus {
+  APPROVED
+  ORDER_SENT
+  SUPPLIER_CONFIRMED
+  IN_TRANSIT
+  DELIVERED
+  CANCELLED
+}
+
+model PurchaseOrder {
+  id           String              @id @default(cuid())
+  businessId   String
+  supplierId   String
+  decisionId   String              @unique // one PO per decision — enforces approve-is-idempotent at the DB level
+  poNumber     String              @unique
+  status       PurchaseOrderStatus @default(APPROVED)
+  totalAmount  Float
+  etaDays      Float
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+  deliveredAt  DateTime?
+
+  business Business            @relation(fields: [businessId], references: [id])
+  supplier Supplier            @relation(fields: [supplierId], references: [id])
+  decision Decision            @relation(fields: [decisionId], references: [id])
+  items    PurchaseOrderItem[]
+}
+
+model PurchaseOrderItem {
+  id              String @id @default(cuid())
+  purchaseOrderId String
+  productId       String
+  quantity        Float
+  unitPrice       Float
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
+  product       Product       @relation(fields: [productId], references: [id])
+
+  @@index([purchaseOrderId])
+}
+
+enum PoolingStatus {
+  OPEN
+  CLOSED
+}
+
+/** combinedQuantity/pooledPrice are cached snapshots, recomputed transactionally on every join via the same tier logic as calc.ts's computePooledPurchase. */
+model PoolingOpportunity {
+  id               String        @id @default(cuid())
+  productId        String
+  targetQuantity   Float
+  combinedQuantity Float
+  basePrice        Float
+  pooledPrice      Float
+  status           PoolingStatus @default(OPEN)
+  expiresAt        DateTime?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  product      Product              @relation(fields: [productId], references: [id])
+  participants PoolingParticipant[]
+}
+
+model PoolingParticipant {
+  id                    String   @id @default(cuid())
+  poolingOpportunityId  String
+  businessId            String? // null for seeded external/demo businesses not backed by a Business row
+  externalBusinessName  String? // used when businessId is null (e.g. "Coffee Point")
+  quantity              Float
+  joinedAt              DateTime @default(now())
+
+  poolingOpportunity PoolingOpportunity @relation(fields: [poolingOpportunityId], references: [id])
+  business           Business?          @relation(fields: [businessId], references: [id])
+
+  @@unique([poolingOpportunityId, businessId])
+  @@index([poolingOpportunityId])
+}
+
+/** Available recovery sources if a product's primary supplier is disrupted — real input data, not invented at request time. */
+model RecoverySource {
+  id                String @id @default(cuid())
+  productId         String
+  label             String
+  type              String // "transfer" | "emergency-order" | "pooled"
+  availableQuantity Float
+  costPerUnit       Float
+
+  product Product @relation(fields: [productId], references: [id])
+
+  @@index([productId])
+}
+
+model SimulationRun {
+  id                   String   @id @default(cuid())
+  businessId           String
+  productId            String
+  scenarioType         String // "WEEKLY_COMPARISON" | "DISRUPTION_STRESS_TEST"
+  demandMultiplier     Float    @default(1)
+  supplierDelayDays    Float    @default(0)
+  supplierCancelled    Boolean  @default(false)
+  baselineStockoutDays Int?
+  pronoiStockoutDays   Int?
+  baselineRevenueLost  Float?
+  pronoiRevenueLost    Float?
+  resultJson           Json
+  createdAt            DateTime @default(now())
+
+  business Business @relation(fields: [businessId], references: [id])
+  product  Product  @relation(fields: [productId], references: [id])
+
+  @@index([businessId, productId, createdAt])
+}
+
+model AuditEvent {
+  id           String   @id @default(cuid())
+  businessId   String? // null for platform-level admin events (see src/server/admin) not scoped to one business
+  entityType   String // "Decision" | "PurchaseOrder" | "PoolingParticipant" | "SimulationRun" | "ProductCategory" | "Supplier" | "SupplierProduct" | "AutoOrderRule" | "BusinessType" | "Region"
+  entityId     String
+  action       String
+  metadataJson Json?
+  createdAt    DateTime @default(now())
+
+  business Business? @relation(fields: [businessId], references: [id])
+
+  @@index([businessId, createdAt])
+  @@index([entityType, entityId])
+}
