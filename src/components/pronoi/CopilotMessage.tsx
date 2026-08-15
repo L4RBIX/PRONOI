@@ -15,6 +15,19 @@ import type { CopilotActionDef } from "@/lib/pronoi/copilotActions";
 
 const LINK_CLASSNAME = "cursor-pointer text-inherit underline underline-offset-2 transition-opacity hover:opacity-70";
 
+/** DeepSeek sometimes wraps emphasis in markdown (**bold**) even though we ask for plain text — render it as actual bold instead of showing literal asterisks. */
+function renderBold(text: string, keyPrefix: string): ReactNode {
+  const parts = text.split(/(\*\*[^*]+\*\*)/g);
+  if (parts.length === 1) return text;
+  return parts.map((part, i) =>
+    part.startsWith("**") && part.endsWith("**") && part.length > 4 ? (
+      <strong key={`${keyPrefix}-b-${i}`}>{part.slice(2, -2)}</strong>
+    ) : (
+      part
+    )
+  );
+}
+
 interface Match {
   start: number;
   end: number;
@@ -53,14 +66,14 @@ function buildInlineSegments(text: string, actions: CopilotActionDef[]): { nodes
   }
 
   if (matches.length === 0) {
-    return { nodes: text, unmatched };
+    return { nodes: renderBold(text, "plain"), unmatched };
   }
 
   matches.sort((a, b) => a.start - b.start);
   const nodes: ReactNode[] = [];
   let cursor = 0;
   matches.forEach((m, i) => {
-    if (m.start > cursor) nodes.push(text.slice(cursor, m.start));
+    if (m.start > cursor) nodes.push(renderBold(text.slice(cursor, m.start), `pre-${i}`));
     nodes.push(
       <Link key={`${m.action.id}-${i}`} href={m.action.route} className={LINK_CLASSNAME}>
         {text.slice(m.start, m.end)}
@@ -68,14 +81,14 @@ function buildInlineSegments(text: string, actions: CopilotActionDef[]): { nodes
     );
     cursor = m.end;
   });
-  if (cursor < text.length) nodes.push(text.slice(cursor));
+  if (cursor < text.length) nodes.push(renderBold(text.slice(cursor), "post"));
 
   return { nodes, unmatched };
 }
 
 export function CopilotMessage({ content, actions }: { content: string; actions?: CopilotActionDef[] }) {
   if (!actions || actions.length === 0) {
-    return <>{content}</>;
+    return <>{renderBold(content, "root")}</>;
   }
 
   const { nodes, unmatched } = buildInlineSegments(content, actions);
