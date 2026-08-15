@@ -1,14 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AgentIcon, ArrowUpIcon } from "@/components/sites/handhold-io-1ee60dfc/shared/icons";
 import { CopilotMessage } from "@/components/pronoi/CopilotMessage";
 import { MicIcon, PendingActionCard, VoiceStatusLine } from "@/components/pronoi/voice/VoiceUi";
 import type { CopilotActionDef } from "@/lib/pronoi/copilotActions";
 import { sanitizeActionIds } from "@/lib/pronoi/copilotActions";
 import { useCopilotUiOptional } from "@/lib/pronoi/copilotUi";
-import { useVoiceDemo } from "@/lib/pronoi/voice/useVoiceDemo";
-import { resetVoiceDemoAction } from "@/server/pronoi/voiceDemo";
+import { useVoiceDemoOptional } from "@/lib/pronoi/voice/voiceDemoContext";
 import { cn } from "@/lib/utils";
 
 const SAMPLE_QUESTIONS: Record<"landing" | "dashboard", string[]> = {
@@ -61,26 +60,24 @@ export function Copilot({ scope }: { scope: "landing" | "dashboard" }) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const isDashboard = scope === "dashboard";
-  const voiceDemo = useVoiceDemo();
+  const voiceDemo = useVoiceDemoOptional();
   const syncedVoiceCount = useRef(0);
-  const [resettingDemo, startResetTransition] = useTransition();
 
   useEffect(() => {
+    if (!voiceDemo) return;
     const turns = voiceDemo.turns;
+    if (turns.length < syncedVoiceCount.current) {
+      // turns got shorter — an external reset (e.g. the sidebar's Reset button, which
+      // shares this same voiceDemo instance) cleared it. Clear the whole transcript too.
+      syncedVoiceCount.current = 0;
+      setMessages([]);
+      return;
+    }
     if (turns.length <= syncedVoiceCount.current) return;
     const newTurns = turns.slice(syncedVoiceCount.current);
     syncedVoiceCount.current = turns.length;
     setMessages((prev) => [...prev, ...newTurns.map((t) => ({ role: t.role === "user" ? ("user" as const) : ("assistant" as const), content: t.text }))]);
-  }, [voiceDemo.turns]);
-
-  function handleResetDemo() {
-    startResetTransition(async () => {
-      await resetVoiceDemoAction();
-      voiceDemo.reset();
-      syncedVoiceCount.current = 0;
-      setMessages([]);
-    });
-  }
+  }, [voiceDemo, voiceDemo?.turns]);
 
   useEffect(() => {
     if (expanded) return;
@@ -173,15 +170,15 @@ export function Copilot({ scope }: { scope: "landing" | "dashboard" }) {
                 <span className="text-sm font-medium">PRONOI Copilot</span>
               </div>
               <div className="flex items-center gap-2">
-                {isDashboard && (
+                {isDashboard && voiceDemo && (
                   <button
                     type="button"
-                    onClick={handleResetDemo}
-                    disabled={resettingDemo}
+                    onClick={voiceDemo.resetAll}
+                    disabled={voiceDemo.isResetting}
                     aria-label="Reset voice demo"
                     className="text-[10px] tracking-wide text-gray-300 uppercase hover:text-gray-500 disabled:opacity-50"
                   >
-                    {resettingDemo ? "…" : "Reset"}
+                    {voiceDemo.isResetting ? "…" : "Reset"}
                   </button>
                 )}
                 <button
@@ -213,7 +210,11 @@ export function Copilot({ scope }: { scope: "landing" | "dashboard" }) {
               )}
               {messages.map((m, i) => {
                 const isLiveVoiceReply =
-                  isDashboard && i === messages.length - 1 && m.role === "assistant" && (voiceDemo.uiState === "PROCESSING" || voiceDemo.uiState === "SPEAKING");
+                  isDashboard &&
+                  Boolean(voiceDemo) &&
+                  i === messages.length - 1 &&
+                  m.role === "assistant" &&
+                  (voiceDemo?.uiState === "PROCESSING" || voiceDemo?.uiState === "SPEAKING");
                 return (
                   <div key={i} className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}>
                     <div
@@ -224,7 +225,7 @@ export function Copilot({ scope }: { scope: "landing" | "dashboard" }) {
                     >
                       {m.role === "assistant" ? (
                         isLiveVoiceReply ? (
-                          voiceDemo.displayedReply || "…"
+                          voiceDemo?.displayedReply || "…"
                         ) : (
                           <CopilotMessage content={m.content} actions={m.actions} />
                         )
@@ -240,20 +241,20 @@ export function Copilot({ scope }: { scope: "landing" | "dashboard" }) {
                   <div className="rounded-2xl bg-gray-100 px-3.5 py-2 text-sm text-gray-400">Thinking…</div>
                 </div>
               )}
-              {isDashboard && voiceDemo.uiState === "TRANSCRIBING" && (
+              {isDashboard && voiceDemo?.uiState === "TRANSCRIBING" && (
                 <div className="flex justify-end">
                   <div className="rounded-2xl bg-black/60 px-3.5 py-2 text-sm text-white">Распознаю речь…</div>
                 </div>
               )}
-              {isDashboard && voiceDemo.uiState === "PROCESSING" && (
+              {isDashboard && voiceDemo?.uiState === "PROCESSING" && (
                 <div className="flex justify-start">
                   <div className="rounded-2xl bg-gray-100 px-3.5 py-2 text-sm text-gray-400">Думаю…</div>
                 </div>
               )}
-              {isDashboard && voiceDemo.pendingAction && <PendingActionCard pendingAction={voiceDemo.pendingAction} />}
+              {isDashboard && voiceDemo?.pendingAction && <PendingActionCard pendingAction={voiceDemo.pendingAction} />}
             </div>
 
-            {isDashboard && <VoiceStatusLine uiState={voiceDemo.uiState} error={voiceDemo.errorMessage} />}
+            {isDashboard && voiceDemo && <VoiceStatusLine uiState={voiceDemo.uiState} error={voiceDemo.errorMessage} />}
 
             <form
               onSubmit={(e) => {
@@ -262,7 +263,7 @@ export function Copilot({ scope }: { scope: "landing" | "dashboard" }) {
               }}
               className="flex items-center gap-2 border-t px-4 py-3"
             >
-              {isDashboard && (
+              {isDashboard && voiceDemo && (
                 <button
                   type="button"
                   onClick={voiceDemo.handleMicClick}

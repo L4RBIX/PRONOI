@@ -7,6 +7,7 @@ import {
   ListChecks,
   Menu,
   Package,
+  RotateCcw,
   Settings,
   ShoppingBag,
   Truck,
@@ -20,6 +21,7 @@ import { AgentIcon } from "@/components/sites/handhold-io-1ee60dfc/shared/icons"
 import { PronoiLogo } from "@/components/sites/handhold-io-1ee60dfc/shared/PronoiLogo";
 import { useCopilotUiOptional } from "@/lib/pronoi/copilotUi";
 import { COMPANY } from "@/lib/pronoi/demoData";
+import { useVoiceDemoOptional } from "@/lib/pronoi/voice/voiceDemoContext";
 import { cn } from "@/lib/utils";
 
 interface NavItem {
@@ -101,6 +103,7 @@ function NavLink({ item, pathname, onNavigate }: { item: NavItem; pathname: stri
 
 function SidebarNav({ pathname, onNavigate }: { pathname: string; onNavigate?: () => void }) {
   const copilotUi = useCopilotUiOptional();
+  const voiceDemo = useVoiceDemoOptional();
 
   return (
     <>
@@ -128,6 +131,17 @@ function SidebarNav({ pathname, onNavigate }: { pathname: string; onNavigate?: (
           </span>
           PRONOI Copilot
         </button>
+        {voiceDemo && (
+          <button
+            type="button"
+            onClick={voiceDemo.resetAll}
+            disabled={voiceDemo.isResetting}
+            className="flex items-center gap-2.5 rounded-xl px-3 py-2 text-left text-sm text-gray-600 transition-colors hover:bg-black/5 hover:text-black disabled:opacity-50"
+          >
+            <RotateCcw className="h-4 w-4 shrink-0" strokeWidth={1.75} />
+            {voiceDemo.isResetting ? "Resetting…" : "Reset demo"}
+          </button>
+        )}
         <Link
           href="/admin"
           onClick={onNavigate}
