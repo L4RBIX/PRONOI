@@ -25,7 +25,11 @@ export function VoiceDemoProvider({ children }: { children: ReactNode }) {
 
   function resetAll() {
     startResetTransition(async () => {
-      await resetVoiceDemoAction();
+      const result = await resetVoiceDemoAction();
+      if (!result.ok) {
+        alert(result.error?.message ?? "Couldn't reset the demo. Please try again.");
+        return;
+      }
       voiceDemo.reset();
     });
   }

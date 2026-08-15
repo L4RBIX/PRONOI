@@ -1,38 +1,26 @@
 "use server";
 
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/server/db";
 import { actionError, actionOk, type ActionResult } from "./errors";
-
-const execFileAsync = promisify(execFile);
+import { seedDatabase } from "./seedDatabase";
 
 /**
  * Restores the demo tenant to its pristine seeded state so the voice-agent
- * demo can be rehearsed repeatedly: truncates every table the demo run
+ * demo can be rehearsed repeatedly: truncates every table a demo run
  * mutates (decisions, purchase orders, pooling participation, simulation
- * history, audit log, inventory snapshots), then re-runs the same seed
- * script `docs/PRONOI_BACKEND.md` documents for manual resets. Products and
- * suppliers are reseeded via upsert, which also resets fields a run may
- * have drifted (e.g. Product.currentStock after a delivery).
+ * history, audit log, inventory snapshots), then reseeds in-process via the
+ * same seedDatabase() function `prisma/seed.ts` uses for local setup.
  *
- * Intentionally dev-only — this is a demo-rehearsal control, not a
- * production data-management feature.
+ * Runs in-process (not by shelling out to `npx tsx prisma/seed.ts`) so it
+ * works in a serverless production deployment, not just local dev.
  */
 export async function resetVoiceDemoAction(): Promise<ActionResult<{ reset: true }>> {
-  if (process.env.NODE_ENV === "production") {
-    return actionError(new Error("Demo reset is disabled in production."));
-  }
   try {
     await prisma.$executeRawUnsafe(
       `TRUNCATE "AuditEvent", "SimulationRun", "PurchaseOrderItem", "PurchaseOrder", "Decision", "PoolingParticipant", "InventorySnapshot" CASCADE;`
     );
-    await execFileAsync("npx", ["tsx", "prisma/seed.ts"], {
-      cwd: process.cwd(),
-      env: process.env,
-      timeout: 30_000,
-    });
+    await seedDatabase(prisma);
 
     revalidatePath("/dashboard");
     revalidatePath("/dashboard/decisions");
