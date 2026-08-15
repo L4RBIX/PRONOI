@@ -177,10 +177,12 @@ export async function chatWithCopilot(messages: CopilotMessage[], scope: Copilot
         response_format: { type: "json_object" },
         messages: [{ role: "system", content: await buildSystemPrompt(scope) }, ...messages.slice(-8)],
       }),
-      signal: AbortSignal.timeout(12000),
+      signal: AbortSignal.timeout(20000),
     });
 
     if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      console.error(`[pronoi] DeepSeek chat request failed: ${response.status} ${response.statusText} — ${body.slice(0, 300)}`);
       const fallback = await buildFallbackReply(scope);
       return { reply: fallback.message, actions: fallback.actions, source: "fallback" };
     }
@@ -188,6 +190,7 @@ export async function chatWithCopilot(messages: CopilotMessage[], scope: Copilot
     const data = (await response.json()) as { choices?: { message?: { content?: string } }[] };
     const text = data.choices?.[0]?.message?.content?.trim();
     if (!text) {
+      console.error("[pronoi] DeepSeek chat returned no message content", JSON.stringify(data).slice(0, 300));
       const fallback = await buildFallbackReply(scope);
       return { reply: fallback.message, actions: fallback.actions, source: "fallback" };
     }
@@ -199,7 +202,8 @@ export async function chatWithCopilot(messages: CopilotMessage[], scope: Copilot
       return { reply: text, actions: [], source: "deepseek" };
     }
     return { reply: parsed.message, actions: sanitizeActionIds(parsed.actionIds), source: "deepseek" };
-  } catch {
+  } catch (err) {
+    console.error("[pronoi] DeepSeek chat request threw:", err instanceof Error ? `${err.name}: ${err.message}` : err);
     const fallback = await buildFallbackReply(scope);
     return { reply: fallback.message, actions: fallback.actions, source: "fallback" };
   }
